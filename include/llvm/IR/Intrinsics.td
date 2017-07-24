@@ -339,6 +339,7 @@ def int_prefetch      : Intrinsic<[],
                                    llvm_i32_ty],
                                   [IntrArgMemOnly, NoCapture<0>]>;
 def int_pcmarker      : Intrinsic<[], [llvm_i32_ty]>;
+def int_cont_marker   : Intrinsic<[llvm_i1_ty], [], [], "llvm.cont_marker">;
 
 def int_readcyclecounter : Intrinsic<[llvm_i64_ty]>;
 

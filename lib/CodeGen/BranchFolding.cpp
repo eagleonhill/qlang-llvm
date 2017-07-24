@@ -1219,7 +1219,7 @@ ReoptimizeBlock:
   // points to this block.  Blocks with their addresses taken shouldn't be
   // optimized away.
   if (IsEmptyBlock(MBB) && !MBB->isEHPad() && !MBB->hasAddressTaken() &&
-      SameFunclet) {
+      SameFunclet && MBB->succ_size() == 1) {
     // Dead block?  Leave for cleanup later.
     if (MBB->pred_empty()) return MadeChange;
 

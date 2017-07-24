@@ -139,6 +139,7 @@ bool llvm::DisplayGraph(StringRef FilenameRef, bool wait,
   std::string ViewerPath;
   GraphSession S;
 
+#if 0
 #ifdef __APPLE__
   wait &= !ViewBackground;
   if (S.TryFindProgram("open", ViewerPath)) {
@@ -152,6 +153,7 @@ bool llvm::DisplayGraph(StringRef FilenameRef, bool wait,
     if (!ExecGraphViewer(ViewerPath, args, Filename, wait, ErrMsg))
       return false;
   }
+#endif
 #endif
   if (S.TryFindProgram("xdg-open", ViewerPath)) {
     std::vector<const char *> args;

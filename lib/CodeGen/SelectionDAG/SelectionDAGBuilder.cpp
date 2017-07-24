@@ -1819,6 +1819,23 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
 
       SwitchCases.clear();
     }
+  } else if (const CallInst *CI = dyn_cast<CallInst>(CondVal)) {
+    const Function *Fn = CI->getCalledFunction();
+    if (Fn && Fn->isIntrinsic() &&
+        Fn->getIntrinsicID() == Intrinsic::cont_marker) {
+      // Add as direct branch to true branch, but add the flase branch as succ.
+      addSuccessorWithProb(BrMBB, Succ0MBB, BranchProbability::getOne());
+      addSuccessorWithProb(BrMBB, Succ1MBB, BranchProbability::getZero());
+      BrMBB->normalizeSuccProbs();
+      Succ1MBB->setIsEHPad(true);
+
+      // If this is not a fall-through branch or optimizations are switched off,
+      // emit the branch.
+      if (Succ0MBB != NextBlock(BrMBB) || TM.getOptLevel() == CodeGenOpt::None)
+        DAG.setRoot(DAG.getNode(ISD::BR, getCurSDLoc(), MVT::Other,
+                                getControlRoot(), DAG.getBasicBlock(Succ0MBB)));
+      return;
+    }
   }
 
   // Create a CaseBlock record representing this branch.
@@ -5646,6 +5663,9 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
     return nullptr;
   case Intrinsic::clear_cache:
     return TLI.getClearCacheBuiltinName();
+  case Intrinsic::cont_marker:
+    // Ignore, applied at branch time.
+    return nullptr;
   case Intrinsic::donothing:
     // ignore
     return nullptr;

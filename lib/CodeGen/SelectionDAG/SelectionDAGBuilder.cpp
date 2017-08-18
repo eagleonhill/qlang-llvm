@@ -5669,6 +5669,10 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
   case Intrinsic::donothing:
     // ignore
     return nullptr;
+  case Intrinsic::cont_value: {
+    LowerCallTo(&I, DAG.getNode(ISD::CONT_VALUE, sdl, MVT::Other), false);
+    return nullptr;
+  }
   case Intrinsic::experimental_stackmap: {
     visitStackmap(I);
     return nullptr;

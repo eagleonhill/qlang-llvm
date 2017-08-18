@@ -554,6 +554,10 @@ def vector_insert : SDNode<"ISD::INSERT_VECTOR_ELT",
 def concat_vectors : SDNode<"ISD::CONCAT_VECTORS",
     SDTypeProfile<1, 2, [SDTCisSubVecOfVec<1, 0>, SDTCisSameAs<1, 2>]>,[]>;
 
+// Used for work-stealing: return a value without any call instructions.
+// Can be used as a return destination for a call that returns the same type.
+def cont_value : SDNode<"ISD::CONT_VALUE", SDTypeProfile<1, 0, []>, []>;
+
 // This operator does not do subvector type checking.  The ARM
 // backend, at least, needs it.
 def vector_extract_subvec : SDNode<"ISD::EXTRACT_SUBVECTOR",

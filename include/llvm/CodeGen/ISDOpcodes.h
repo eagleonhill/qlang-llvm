@@ -622,6 +622,11 @@ namespace ISD {
     CALLSEQ_START,  // Beginning of a call sequence
     CALLSEQ_END,    // End of a call sequence
 
+    /// CONT_VALUE - Retrieve the return value from the return barriar.
+    /// It will emit the post-call sequence to allow the return value to be
+    /// used in the stealed branch.
+    CONT_VALUE,
+
     /// VAARG - VAARG has four operands: an input chain, a pointer, a SRCVALUE,
     /// and the alignment. It returns a pair of values: the vaarg value and a
     /// new chain.

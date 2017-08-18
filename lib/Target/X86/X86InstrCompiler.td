@@ -1084,6 +1084,9 @@ def : Pat<(X86call (i64 tglobaladdr:$dst)),
 def : Pat<(X86call (i64 texternalsym:$dst)),
           (CALL64pcrel32 texternalsym:$dst)>;
 
+// Continuation of a call, lowered to NOP
+def : Pat<(X86call (cont_value)), (NOOP)>;
+
 // Tailcall stuff. The TCRETURN instructions execute after the epilog, so they
 // can never use callee-saved registers. That is the purpose of the GR64_TC
 // register classes.

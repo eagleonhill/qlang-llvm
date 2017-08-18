@@ -339,7 +339,14 @@ def int_prefetch      : Intrinsic<[],
                                    llvm_i32_ty],
                                   [IntrArgMemOnly, NoCapture<0>]>;
 def int_pcmarker      : Intrinsic<[], [llvm_i32_ty]>;
+
+// Used for adding an extra return address for the previous function call.
+// Use cont_marker to introduce an artificial branch after the call, and
+// use cont_value to retrieve the original return value for the call in the
+// other branch. The runtime may swap the return address on the stack with
+// the other branch at any time.
 def int_cont_marker   : Intrinsic<[llvm_i1_ty], [], [], "llvm.cont_marker">;
+def int_cont_value    : Intrinsic<[llvm_any_ty], [], [], "llvm.cont_value">;
 
 def int_readcyclecounter : Intrinsic<[llvm_i64_ty]>;
 

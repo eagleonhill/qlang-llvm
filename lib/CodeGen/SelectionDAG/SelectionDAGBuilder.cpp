@@ -2262,6 +2262,12 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
     case Intrinsic::experimental_gc_statepoint:
       LowerStatepoint(ImmutableStatepoint(&I), EHPadBB);
       break;
+    case Intrinsic::cont_invoke:
+      LowerContinuableInvoke(&I, EHPadBB);
+      break;
+    case Intrinsic::cont_branch_value:
+      LowerContinuableBranchValue(&I);
+      break;
     }
   } else if (I.countOperandBundlesOfType(LLVMContext::OB_deopt)) {
     // Currently we do not lower any intrinsic calls with deopt operand bundles.
@@ -5669,7 +5675,9 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
   case Intrinsic::donothing:
     // ignore
     return nullptr;
-  case Intrinsic::cont_value: {
+  // TODO
+  case Intrinsic::cont_orig_value:
+  case Intrinsic::cont_branch_value: {
     LowerCallTo(&I, DAG.getNode(ISD::CONT_VALUE, sdl, MVT::Other), false);
     return nullptr;
   }

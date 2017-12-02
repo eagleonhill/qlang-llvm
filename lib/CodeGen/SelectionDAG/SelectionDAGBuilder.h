@@ -771,6 +771,9 @@ public:
   void LowerStatepoint(ImmutableStatepoint Statepoint,
                        const BasicBlock *EHPadBB = nullptr);
 
+  void LowerContinuableInvoke(ImmutableCallSite CS, const BasicBlock *EHPadBB = nullptr);
+  void LowerContinuableBranchValue(ImmutableCallSite CS);
+
   void LowerCallSiteWithDeoptBundle(ImmutableCallSite CS, SDValue Callee,
                                     const BasicBlock *EHPadBB);
 

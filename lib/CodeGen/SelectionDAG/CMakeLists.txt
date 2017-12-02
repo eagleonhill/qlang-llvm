@@ -1,4 +1,5 @@
 add_llvm_library(LLVMSelectionDAG
+  ContinuableLowering.cpp
   DAGCombiner.cpp
   FastISel.cpp
   FunctionLoweringInfo.cpp

@@ -345,8 +345,10 @@ def int_pcmarker      : Intrinsic<[], [llvm_i32_ty]>;
 // use cont_value to retrieve the original return value for the call in the
 // other branch. The runtime may swap the return address on the stack with
 // the other branch at any time.
-def int_cont_marker   : Intrinsic<[llvm_i1_ty], [], [], "llvm.cont_marker">;
-def int_cont_value    : Intrinsic<[llvm_any_ty], [], [], "llvm.cont_value">;
+def int_cont_invoke   : Intrinsic<[llvm_token_ty], [llvm_ptr_ty, llvm_anyptr_ty, llvm_vararg_ty], [Throws], "llvm.cont_invoke">;
+def int_cont_marker   : Intrinsic<[llvm_i1_ty], [llvm_token_ty], [], "llvm.cont_marker">;
+def int_cont_orig_value    : Intrinsic<[llvm_any_ty], [llvm_token_ty], [], "llvm.cont_orig_value">;
+def int_cont_branch_value    : Intrinsic<[llvm_any_ty], [llvm_token_ty], [IntrReadMem, Throws], "llvm.cont_branch_value">;
 
 def int_readcyclecounter : Intrinsic<[llvm_i64_ty]>;
 

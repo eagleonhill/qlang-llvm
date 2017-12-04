@@ -1729,6 +1729,10 @@ bool X86FastISel::X86SelectBranch(const Instruction *I) {
       .addMBB(TrueMBB);
     finishCondBranch(BI->getParent(), TrueMBB, FalseMBB);
     return true;
+  } else if (CallInst *CI = dyn_cast<CallInst>(BI->getCondition())) {
+    if (CI->getCalledFunction()->getIntrinsicID() == Intrinsic::cont_marker) {
+      return false;
+    }
   }
 
   // Otherwise do a clumsy setcc and re-test it.

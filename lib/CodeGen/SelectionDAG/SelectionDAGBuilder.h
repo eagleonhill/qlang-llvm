@@ -773,6 +773,7 @@ public:
 
   void LowerContinuableInvoke(ImmutableCallSite CS, const BasicBlock *EHPadBB = nullptr);
   void LowerContinuableBranchValue(ImmutableCallSite CS);
+  void visitContinuableOrigValue(const CallInst &CI);
 
   void LowerCallSiteWithDeoptBundle(ImmutableCallSite CS, SDValue Callee,
                                     const BasicBlock *EHPadBB);

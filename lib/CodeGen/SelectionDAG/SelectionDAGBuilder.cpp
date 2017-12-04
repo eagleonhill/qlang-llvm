@@ -2283,7 +2283,7 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
   // available as a virtual register.
   // We already took care of the exported value for the statepoint instruction
   // during call to the LowerStatepoint.
-  if (!isStatepoint(I)) {
+  if (!isStatepoint(I) && Fn->getIntrinsicID() != Intrinsic::cont_invoke) {
     CopyToExportRegsIfNeeded(&I);
   }
 
@@ -5671,16 +5671,20 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
     return TLI.getClearCacheBuiltinName();
   case Intrinsic::cont_marker:
     // Ignore, applied at branch time.
-    return nullptr;
-  case Intrinsic::donothing:
-    // ignore
+    setValue(&I, DAG.getUNDEF(MVT(MVT::i1)));
     return nullptr;
   // TODO
   case Intrinsic::cont_orig_value:
+    visitContinuableOrigValue(I);
+    return nullptr;
   case Intrinsic::cont_branch_value: {
-    LowerCallTo(&I, DAG.getNode(ISD::CONT_VALUE, sdl, MVT::Other), false);
+    //LowerCallTo(&I, DAG.getNode(ISD::CONT_VALUE, sdl, MVT::Other), false);
+    visitContinuableOrigValue(I);
     return nullptr;
   }
+  case Intrinsic::donothing:
+    // ignore
+    return nullptr;
   case Intrinsic::experimental_stackmap: {
     visitStackmap(I);
     return nullptr;
@@ -7503,6 +7507,46 @@ void SelectionDAGBuilder::visitStackmap(const CallInst &CI) {
   FuncInfo.MF->getFrameInfo().setHasStackMap();
 }
 
+void SelectionDAGBuilder::LowerContinuableBranchValue(ImmutableCallSite cs) {}
+
+void SelectionDAGBuilder::visitContinuableOrigValue(const CallInst &CI) {
+  auto ret = CI.getArgOperand(0);
+  auto RetTy = CI.getType();
+  SDValue CopyFromReg = getCopyFromRegs(ret, RetTy);
+
+  assert(CopyFromReg.getNode());
+  setValue(&CI, CopyFromReg);
+}
+
+void SelectionDAGBuilder::LowerContinuableInvoke(
+    ImmutableCallSite CS, const llvm::BasicBlock *EHPadBB) {
+  const Value *Callee = CS.getArgument(1);
+  FunctionType *FTy = cast<FunctionType>(
+      cast<PointerType>(Callee->getType())->getElementType());
+  Type *RetTy = FTy->getReturnType();
+
+  TargetLowering::CallLoweringInfo CLI(DAG);
+  populateCallLoweringInfo(CLI, CS, /*arg no */ 2, CS.arg_size() - 2,
+                           getValue(Callee), RetTy, false);
+
+  std::pair<SDValue, SDValue> Result = lowerInvokable(CLI, EHPadBB);
+
+  if (Result.first.getNode()) {
+    const Instruction *Inst = CS.getInstruction();
+    Result.first = lowerRangeToAssertZExt(DAG, *Inst, Result.first);
+
+    unsigned Reg = FuncInfo.CreateRegs(RetTy);
+    RegsForValue RFV(*DAG.getContext(), DAG.getTargetLoweringInfo(),
+                       DAG.getDataLayout(), Reg, RetTy);
+    SDValue Chain = DAG.getEntryNode();
+
+    RFV.getCopyToRegs(Result.first, DAG, getCurSDLoc(), Chain, nullptr);
+    PendingExports.push_back(Chain);
+    FuncInfo.ValueMap[CS.getInstruction()] = Reg;
+    setValue(Inst, Result.first);
+  }
+}
+
 /// \brief Lower llvm.experimental.patchpoint directly to its target opcode.
 void SelectionDAGBuilder::visitPatchpoint(ImmutableCallSite CS,
                                           const BasicBlock *EHPadBB) {
@@ -7667,6 +7711,96 @@ static AttributeSet getReturnAttrs(TargetLowering::CallLoweringInfo &CLI) {
 
   return AttributeSet::get(CLI.RetTy->getContext(), AttributeSet::ReturnIndex,
                            Attrs);
+}
+
+static std::pair<SDValue, SDValue>
+LowerReturn(const TargetLowering &TLI, TargetLowering::CallLoweringInfo &CLI,
+            bool CanLowerReturn, Type *OrigRetTy, ArrayRef<EVT> RetTys,
+            ArrayRef<uint64_t> Offsets, int DemoteStackIdx,
+            SDValue DemoteStackSlot) {
+  auto &DL = CLI.DAG.getDataLayout();
+  // For a tail call, the return value is merely live-out and there aren't
+  // any nodes in the DAG representing it. Return a special value to
+  // indicate that a tail call has been emitted and no more Instructions
+  // should be processed in the current block.
+  if (CLI.IsTailCall) {
+    CLI.DAG.setRoot(CLI.Chain);
+    return std::make_pair(SDValue(), SDValue());
+  }
+  auto &InVals = CLI.InVals;
+
+#ifndef NDEBUG
+  for (unsigned i = 0, e = CLI.Ins.size(); i != e; ++i) {
+    assert(InVals[i].getNode() && "LowerCall emitted a null value!");
+    assert(EVT(CLI.Ins[i].VT) == InVals[i].getValueType() &&
+           "LowerCall emitted a value with the wrong type!");
+  }
+#endif
+
+  SmallVector<SDValue, 4> ReturnValues;
+  if (!CanLowerReturn) {
+    // The instruction result is the result of loading from the
+    // hidden sret parameter.
+    SmallVector<EVT, 1> PVTs;
+    Type *PtrRetTy = PointerType::getUnqual(OrigRetTy);
+
+    ComputeValueVTs(TLI, DL, PtrRetTy, PVTs);
+    assert(PVTs.size() == 1 && "Pointers should fit in one register");
+    EVT PtrVT = PVTs[0];
+
+    unsigned NumValues = RetTys.size();
+    ReturnValues.resize(NumValues);
+    SmallVector<SDValue, 4> Chains(NumValues);
+
+    // An aggregate return value cannot wrap around the address space, so
+    // offsets to its parts don't wrap either.
+    SDNodeFlags Flags;
+    Flags.setNoUnsignedWrap(true);
+
+    for (unsigned i = 0; i < NumValues; ++i) {
+      SDValue Add = CLI.DAG.getNode(ISD::ADD, CLI.DL, PtrVT, DemoteStackSlot,
+                                    CLI.DAG.getConstant(Offsets[i], CLI.DL,
+                                                        PtrVT), &Flags);
+      SDValue L = CLI.DAG.getLoad(
+          RetTys[i], CLI.DL, CLI.Chain, Add,
+          MachinePointerInfo::getFixedStack(CLI.DAG.getMachineFunction(),
+                                            DemoteStackIdx, Offsets[i]),
+          /* Alignment = */ 1);
+      ReturnValues[i] = L;
+      Chains[i] = L.getValue(1);
+    }
+
+    CLI.Chain = CLI.DAG.getNode(ISD::TokenFactor, CLI.DL, MVT::Other, Chains);
+  } else {
+    // Collect the legal value parts into potentially illegal values
+    // that correspond to the original function's return values.
+    Optional<ISD::NodeType> AssertOp;
+    if (CLI.RetSExt)
+      AssertOp = ISD::AssertSext;
+    else if (CLI.RetZExt)
+      AssertOp = ISD::AssertZext;
+    unsigned CurReg = 0;
+    for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
+      EVT VT = RetTys[I];
+      MVT RegisterVT = TLI.getRegisterType(CLI.RetTy->getContext(), VT);
+      unsigned NumRegs = TLI.getNumRegisters(CLI.RetTy->getContext(), VT);
+
+      ReturnValues.push_back(getCopyFromParts(CLI.DAG, CLI.DL, &InVals[CurReg],
+                                              NumRegs, RegisterVT, VT, nullptr,
+                                              AssertOp));
+      CurReg += NumRegs;
+    }
+
+    // For a function returning void, there is no return value. We can't create
+    // such a node, so we just return a null return value in that case. In
+    // that case, nothing will actually look at the value.
+    if (ReturnValues.empty())
+      return std::make_pair(SDValue(), CLI.Chain);
+  }
+
+  SDValue Res = CLI.DAG.getNode(ISD::MERGE_VALUES, CLI.DL,
+                                CLI.DAG.getVTList(RetTys), ReturnValues);
+  return std::make_pair(Res, CLI.Chain);
 }
 
 /// TargetLowering::LowerCallTo - This is the default LowerCallTo
@@ -7890,7 +8024,6 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
 
   // Update CLI.InVals to use outside of this function.
   CLI.InVals = InVals;
-
   // Verify that the target's LowerCall behaved as expected.
   assert(CLI.Chain.getNode() && CLI.Chain.getValueType() == MVT::Other &&
          "LowerCall didn't return a valid chain!");
@@ -7899,88 +8032,27 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   assert((CLI.IsTailCall || InVals.size() == CLI.Ins.size()) &&
          "LowerCall didn't emit the correct number of values!");
 
-  // For a tail call, the return value is merely live-out and there aren't
-  // any nodes in the DAG representing it. Return a special value to
-  // indicate that a tail call has been emitted and no more Instructions
-  // should be processed in the current block.
-  if (CLI.IsTailCall) {
-    CLI.DAG.setRoot(CLI.Chain);
-    return std::make_pair(SDValue(), SDValue());
-  }
-
-#ifndef NDEBUG
-  for (unsigned i = 0, e = CLI.Ins.size(); i != e; ++i) {
-    assert(InVals[i].getNode() && "LowerCall emitted a null value!");
-    assert(EVT(CLI.Ins[i].VT) == InVals[i].getValueType() &&
-           "LowerCall emitted a value with the wrong type!");
-  }
-#endif
-
-  SmallVector<SDValue, 4> ReturnValues;
-  if (!CanLowerReturn) {
-    // The instruction result is the result of loading from the
-    // hidden sret parameter.
-    SmallVector<EVT, 1> PVTs;
-    Type *PtrRetTy = PointerType::getUnqual(OrigRetTy);
-
-    ComputeValueVTs(*this, DL, PtrRetTy, PVTs);
-    assert(PVTs.size() == 1 && "Pointers should fit in one register");
-    EVT PtrVT = PVTs[0];
-
-    unsigned NumValues = RetTys.size();
-    ReturnValues.resize(NumValues);
-    SmallVector<SDValue, 4> Chains(NumValues);
-
-    // An aggregate return value cannot wrap around the address space, so
-    // offsets to its parts don't wrap either.
-    SDNodeFlags Flags;
-    Flags.setNoUnsignedWrap(true);
-
-    for (unsigned i = 0; i < NumValues; ++i) {
-      SDValue Add = CLI.DAG.getNode(ISD::ADD, CLI.DL, PtrVT, DemoteStackSlot,
-                                    CLI.DAG.getConstant(Offsets[i], CLI.DL,
-                                                        PtrVT), &Flags);
-      SDValue L = CLI.DAG.getLoad(
-          RetTys[i], CLI.DL, CLI.Chain, Add,
-          MachinePointerInfo::getFixedStack(CLI.DAG.getMachineFunction(),
-                                            DemoteStackIdx, Offsets[i]),
-          /* Alignment = */ 1);
-      ReturnValues[i] = L;
-      Chains[i] = L.getValue(1);
-    }
-
-    CLI.Chain = CLI.DAG.getNode(ISD::TokenFactor, CLI.DL, MVT::Other, Chains);
-  } else {
-    // Collect the legal value parts into potentially illegal values
-    // that correspond to the original function's return values.
-    Optional<ISD::NodeType> AssertOp;
-    if (CLI.RetSExt)
-      AssertOp = ISD::AssertSext;
-    else if (CLI.RetZExt)
-      AssertOp = ISD::AssertZext;
-    unsigned CurReg = 0;
-    for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
-      EVT VT = RetTys[I];
-      MVT RegisterVT = getRegisterType(CLI.RetTy->getContext(), VT);
-      unsigned NumRegs = getNumRegisters(CLI.RetTy->getContext(), VT);
-
-      ReturnValues.push_back(getCopyFromParts(CLI.DAG, CLI.DL, &InVals[CurReg],
-                                              NumRegs, RegisterVT, VT, nullptr,
-                                              AssertOp));
-      CurReg += NumRegs;
-    }
-
-    // For a function returning void, there is no return value. We can't create
-    // such a node, so we just return a null return value in that case. In
-    // that case, nothing will actually look at the value.
-    if (ReturnValues.empty())
-      return std::make_pair(SDValue(), CLI.Chain);
-  }
-
-  SDValue Res = CLI.DAG.getNode(ISD::MERGE_VALUES, CLI.DL,
-                                CLI.DAG.getVTList(RetTys), ReturnValues);
-  return std::make_pair(Res, CLI.Chain);
+  return ::LowerReturn(*this, CLI, CanLowerReturn, OrigRetTy, RetTys,
+                       Offsets, DemoteStackIdx, DemoteStackSlot);
 }
+
+#if 0
+static std::pair<SDValue, SDValue> LowerContinuableBranchValue(
+    const TargetLowering &TLI, TargetLowering::CallLoweringInfo &CLI,
+    Type *OrigRetTy, bool CanLowerReturn, int DemoteStackIdx) {
+  SmallVector<EVT, 4> RetTys;
+  SmallVector<uint64_t, 4> Offsets;
+  auto &DL = CLI.DAG.getDataLayout();
+  ComputeValueVTs(TLI, DL, CLI.RetTy, RetTys, &Offsets);
+  SDValue DemoteStackSlot;
+  if (!CanLowerReturn) {
+    DemoteStackSlot =
+        CLI.DAG.getFrameIndex(DemoteStackIdx, TLI.getPointerTy(DL));
+  }
+  return ::LowerReturn(TLI, CLI, CanLowerReturn, OrigRetTy, RetTys,
+                       Offsets, DemoteStackIdx, DemoteStackSlot);
+}
+#endif
 
 void TargetLowering::LowerOperationWrapper(SDNode *N,
                                            SmallVectorImpl<SDValue> &Results,

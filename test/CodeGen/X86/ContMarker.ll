@@ -1,20 +1,18 @@
-; RUN: llc < %s -mtriple=i686-apple-darwin8 -mcpu=yonah | FileCheck %s -check-prefix=DARWIN
+; RUN: llc < %s -mtriple=x86_64-apple-darwin8 -mcpu=skylake | FileCheck %s -check-prefix=DARWIN
 
 ; DARWIN-LABEL _test_int:
-; DARWIN: 	calll	_callee
+; DARWIN: 	callq	_callee
 
-; DARWIN: 	movl	%eax, (%esp)
-; DARWIN-NEXT: 	calll	_dummy1
+; DARWIN: 	movl	%eax, %edi
+; DARWIN-NEXT: 	callq	_dummy1
 ; DARWIN-NEXT: 	movl	$1, %eax
-; DARWIN-NEXT: 	addl	$12, %esp
-; DARWIN-NEXT: 	retl
+; DARWIN: 	retq
 
 ; DARWIN: 	nop
-; DARWIN-NEXT: 	movl	%eax, (%esp)
-; DARWIN-NEXT: 	calll	_dummy2
+; DARWIN-NEXT: 	movl	%eax, %edi
+; DARWIN-NEXT: 	callq	_dummy2
 ; DARWIN-NEXT: 	movl	$2, %eax
-; DARWIN-NEXT: 	addl	$12, %esp
-; DARWIN-NEXT: 	retl
+; DARWIN: 	retq
 
 define i32 @test_int() personality i32 (...)* @__qlang_personality_v0 {
 entry:
@@ -44,22 +42,20 @@ r:
 }
 
 ; DARWIN-LABEL _test_ptrs:
-; DARWIN: 	calll	_callee_str
+; DARWIN: 	callq	_callee_str
 
-; DARWIN: 	movl	[[RETP:[^,]+]], [[TMP1:[^,]+]]
-; DARWIN-NEXT:  movl  [[TMP1]], (%esp)
-; DARWIN-NEXT: 	calll	_dummy1
+; DARWIN: 	movl	[[RETP:[^,]+]], %edi
+; DARWIN-NEXT: 	callq	_dummy1
 ; DARWIN-NEXT: 	movl	$1, %eax
-; DARWIN-NEXT: 	addl	$[[StackSize:[0-9]+]], %esp
-; DARWIN-NEXT: 	retl
+; DARWIN-NEXT: 	addq	$[[StackSize:[0-9]+]], %rsp
+; DARWIN-NEXT: 	retq
 
 ; DARWIN: 	nop
-; DARWIN-NEXT: 	movl	[[RETP]], [[TMP2:[^,]+]]
-; DARWIN-NEXT:  movl  [[TMP2]], (%esp)
-; DARWIN-NEXT: 	calll	_dummy2
+; DARWIN-NEXT: 	movl	[[RETP]], %edi
+; DARWIN-NEXT: 	callq	_dummy2
 ; DARWIN-NEXT: 	movl	$2, %eax
-; DARWIN-NEXT: 	addl	$[[StackSize]], %esp
-; DARWIN-NEXT: 	retl
+; DARWIN-NEXT: 	addq	$[[StackSize]], %rsp
+; DARWIN-NEXT: 	retq
 
 %struct.ptrs = type {i32*, i32*, i32, i32*, i32*}
 

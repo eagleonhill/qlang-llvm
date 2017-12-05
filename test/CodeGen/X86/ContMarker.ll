@@ -1,8 +1,7 @@
 ; RUN: llc < %s -mtriple=i686-apple-darwin8 -mcpu=yonah | FileCheck %s -check-prefix=DARWIN
 
 ; DARWIN-LABEL _test_int:
-; DARWIN: 	movl	$[[STEALB:Ltmp[0-9]+]], (%esp)
-; DARWIN-NEXT: 	calll	_callee
+; DARWIN: 	calll	_callee
 
 ; DARWIN: 	movl	%eax, (%esp)
 ; DARWIN-NEXT: 	calll	_dummy1
@@ -10,7 +9,6 @@
 ; DARWIN-NEXT: 	addl	$12, %esp
 ; DARWIN-NEXT: 	retl
 
-; DARWIN: [[STEALB]]:
 ; DARWIN: 	nop
 ; DARWIN-NEXT: 	movl	%eax, (%esp)
 ; DARWIN-NEXT: 	calll	_dummy2
@@ -46,21 +44,21 @@ r:
 }
 
 ; DARWIN-LABEL _test_ptrs:
-; DARWIN: 	movl	$[[STEALB:Ltmp[0-9]+]], (%esp)
-; DARWIN-NEXT: 	calll	_callee
+; DARWIN: 	calll	_callee_str
 
-; DARWIN: 	movl	%eax, (%esp)
+; DARWIN: 	movl	[[RETP:[^,]+]], [[TMP1:[^,]+]]
+; DARWIN-NEXT:  movl  [[TMP1]], (%esp)
 ; DARWIN-NEXT: 	calll	_dummy1
 ; DARWIN-NEXT: 	movl	$1, %eax
-; DARWIN-NEXT: 	addl	$12, %esp
+; DARWIN-NEXT: 	addl	$[[StackSize:[0-9]+]], %esp
 ; DARWIN-NEXT: 	retl
 
-; DARWIN: [[STEALB]]:
 ; DARWIN: 	nop
-; DARWIN-NEXT: 	movl	%eax, (%esp)
+; DARWIN-NEXT: 	movl	[[RETP]], [[TMP2:[^,]+]]
+; DARWIN-NEXT:  movl  [[TMP2]], (%esp)
 ; DARWIN-NEXT: 	calll	_dummy2
 ; DARWIN-NEXT: 	movl	$2, %eax
-; DARWIN-NEXT: 	addl	$12, %esp
+; DARWIN-NEXT: 	addl	$[[StackSize]], %esp
 ; DARWIN-NEXT: 	retl
 
 %struct.ptrs = type {i32*, i32*, i32, i32*, i32*}

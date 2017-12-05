@@ -141,6 +141,8 @@ public:
   /// instances.
   DenseMap<const Instruction *, StatepointSpillMap> StatepointSpillMaps;
 
+  DenseMap<const Instruction *, int> DemoteStackIdxMaps;
+
   /// StaticAllocaMap - Keep track of frame indices for fixed sized allocas in
   /// the entry block.  This allows the allocas to be efficiently referenced
   /// anywhere in the function.

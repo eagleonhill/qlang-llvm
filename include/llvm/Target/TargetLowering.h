@@ -2580,6 +2580,7 @@ public:
     bool IsTailCall;
 
     unsigned NumFixedArgs;
+    int DemoteStackIdx = -1;
     CallingConv::ID CallConv;
     SDValue Callee;
     ArgListTy Args;

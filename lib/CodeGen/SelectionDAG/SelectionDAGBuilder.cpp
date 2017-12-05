@@ -1823,11 +1823,9 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
     const Function *Fn = CI->getCalledFunction();
     if (Fn && Fn->isIntrinsic() &&
         Fn->getIntrinsicID() == Intrinsic::cont_marker) {
-      // Add as direct branch to true branch, but add the flase branch as succ.
+      // Add as direct branch to true branch, the other branch will be added by invoke.
       addSuccessorWithProb(BrMBB, Succ0MBB, BranchProbability::getOne());
-      addSuccessorWithProb(BrMBB, Succ1MBB, BranchProbability::getZero());
       BrMBB->normalizeSuccProbs();
-      Succ1MBB->setIsEHPad(true);
 
       // If this is not a fall-through branch or optimizations are switched off,
       // emit the branch.
@@ -2299,6 +2297,17 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
   for (auto &UnwindDest : UnwindDests) {
     UnwindDest.first->setIsEHPad();
     addSuccessorWithProb(InvokeMBB, UnwindDest.first, UnwindDest.second);
+  }
+  if (Fn->getIntrinsicID() == Intrinsic::cont_invoke) {
+    // Add successor for the branch value.
+    for (const User *user : I.users()) {
+      ImmutableCallSite CS(user);
+      if (CS.getIntrinsicID() == Intrinsic::cont_branch_value) {
+        MachineBasicBlock *MBB = FuncInfo.MBBMap[CS.getInstruction()->getParent()];
+        MBB->setIsEHPad();
+        addSuccessorWithProb(InvokeMBB, MBB, BranchProbability::getZero());
+      }
+    }
   }
   InvokeMBB->normalizeSuccProbs();
 

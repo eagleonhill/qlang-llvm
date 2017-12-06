@@ -7676,13 +7676,13 @@ void SelectionDAGBuilder::visitContinuableOrigValue(const CallInst &CI) {
 
 void SelectionDAGBuilder::LowerContinuableInvoke(
     ImmutableCallSite CS, const llvm::BasicBlock *EHPadBB) {
-  const Value *Callee = CS.getArgument(1);
+  const Value *Callee = CS.getArgument(0);
   FunctionType *FTy = cast<FunctionType>(
       cast<PointerType>(Callee->getType())->getElementType());
   Type *RetTy = FTy->getReturnType();
 
   TargetLowering::CallLoweringInfo CLI(DAG);
-  populateCallLoweringInfo(CLI, CS, /*arg no */ 2, CS.arg_size() - 2,
+  populateCallLoweringInfo(CLI, CS, /*arg no */ 1, CS.arg_size() - 1,
                            getValue(Callee), RetTy, false);
 
   std::pair<SDValue, SDValue> Result = lowerInvokable(CLI, EHPadBB);

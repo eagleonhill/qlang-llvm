@@ -16,7 +16,7 @@
 
 define i32 @test_int() personality i32 (...)* @__qlang_personality_v0 {
 entry:
-  %vtoken = invoke token(i8*, i32()*, ...) @llvm.cont_invoke.p0f_i32f(i8* blockaddress(@test_int, %t2), i32()* @callee) to label %cont1 unwind label %unwnd
+  %vtoken = invoke token(i32()*, ...) @llvm.cont_invoke.p0f_i32f(i32()* @callee) to label %cont1 unwind label %unwnd
 
 unwnd:
   %l = landingpad {i8*, i32} cleanup
@@ -61,7 +61,7 @@ r:
 
 define i32 @test_ptrs() personality i32 (...)* @__qlang_personality_v0 {
 entry:
-  %vtoken = invoke token(i8*, %struct.ptrs()*, ...) @llvm.cont_invoke.p0f_s_struct.ptrssf(i8* blockaddress(@test_ptrs, %t2), %struct.ptrs ()* @callee_str) to label %cont1 unwind label %unwnd
+  %vtoken = invoke token(%struct.ptrs()*, ...) @llvm.cont_invoke.p0f_s_struct.ptrssf(%struct.ptrs ()* @callee_str) to label %cont1 unwind label %unwnd
 
 unwnd:
   %l = landingpad {i8*, i32} cleanup
@@ -92,8 +92,8 @@ declare i32 @callee()
 declare %struct.ptrs @callee_str()
 declare void @dummy1(i32)
 declare void @dummy2(i32)
-declare token @llvm.cont_invoke.p0f_i32f(i8*, i32()*, ...)
-declare token @llvm.cont_invoke.p0f_s_struct.ptrssf(i8*, %struct.ptrs()*, ...)
+declare token @llvm.cont_invoke.p0f_i32f(i32()*, ...)
+declare token @llvm.cont_invoke.p0f_s_struct.ptrssf(%struct.ptrs()*, ...)
 declare i1 @llvm.cont_marker(token)
 declare i32 @llvm.cont_orig_value.i32(token)
 declare i32 @llvm.cont_branch_value.i32(token)

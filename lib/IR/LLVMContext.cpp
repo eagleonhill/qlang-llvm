@@ -80,6 +80,11 @@ LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
   assert(GCTransitionEntry->second == LLVMContext::OB_gc_transition &&
          "gc-transition operand bundle id drifted!");
   (void)GCTransitionEntry;
+
+  auto *GClivevarsEntry = pImpl->getOrInsertBundleTag("gc-livevars");
+  assert(GClivevarsEntry->second == LLVMContext::OB_gc_livevars &&
+         "gc-livevars operand bundle id drifted!");
+  (void)GClivevarsEntry;
 }
 
 LLVMContext::~LLVMContext() { delete pImpl; }

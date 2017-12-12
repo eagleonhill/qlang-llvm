@@ -2238,8 +2238,9 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
 
   // Deopt bundles are lowered in LowerCallSiteWithDeoptBundle, and we don't
   // have to do anything here to lower funclet bundles.
-  assert(!I.hasOperandBundlesOtherThan(
-             {LLVMContext::OB_deopt, LLVMContext::OB_funclet}) &&
+  assert(!I.hasOperandBundlesOtherThan({LLVMContext::OB_deopt,
+                                        LLVMContext::OB_funclet,
+                                        LLVMContext::OB_gc_livevars}) &&
          "Cannot lower invokes with arbitrary operand bundles yet!");
 
   const Value *Callee(I.getCalledValue());
@@ -5794,6 +5795,63 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
   }
 }
 
+static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
+                                    SelectionDAGBuilder &builder,
+                                    SDNode *CallEnd) {
+  if (!CLI.CS) {
+    return;
+  }
+  auto bundle = CLI.CS->getOperandBundle(LLVMContext::OB_gc_livevars);
+  if (!bundle.hasValue()) {
+    return;
+  }
+  bool HasDef = !CLI.RetTy->isVoidTy();
+  if (HasDef) {
+    if (CallEnd->getOpcode() == ISD::LOAD)
+      CallEnd = CallEnd->getOperand(0).getNode();
+    else
+      while (CallEnd->getOpcode() == ISD::CopyFromReg)
+        CallEnd = CallEnd->getOperand(0).getNode();
+  }
+
+  assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
+  SDValue CallEndChain = CallEnd->getOperand(0);
+  SDValue Chain = CallEndChain;
+  SDValue InFlag = Chain.getValue(1);
+
+  SmallVector<SDValue, 8> Ops;
+  Ops.reserve(bundle.getValue().Inputs.size() + 2);
+  auto &DAG = builder.DAG;
+  SDLoc DL = builder.getCurSDLoc();
+  Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i64));
+  Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i32));
+  for (Value *liveVar : bundle.getValue().Inputs) {
+    SDValue OpVal = builder.getValue(liveVar);
+    if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(OpVal)) {
+      Ops.push_back(
+          builder.DAG.getTargetConstant(StackMaps::ConstantOp, DL, MVT::i64));
+      Ops.push_back(
+          builder.DAG.getTargetConstant(C->getSExtValue(), DL, MVT::i64));
+    } else if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(OpVal)) {
+      const TargetLowering &TLI = builder.DAG.getTargetLoweringInfo();
+      Ops.push_back(builder.DAG.getTargetFrameIndex(
+          FI->getIndex(), TLI.getPointerTy(builder.DAG.getDataLayout())));
+    } else
+      Ops.push_back(OpVal);
+  }
+
+  Ops.push_back(Chain);
+  Ops.push_back(InFlag);
+  SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
+  SDNode *SM = DAG.getMachineNode(TargetOpcode::STACKMAP, DL, NodeTys, Ops);
+
+  Chain = SDValue(SM, 0);
+  InFlag = Chain.getValue(1);
+
+  DAG.UpdateNodeOperands(CallEnd, Chain, CallEnd->getOperand(1),
+                         CallEnd->getOperand(2), InFlag);
+}
+
 std::pair<SDValue, SDValue>
 SelectionDAGBuilder::lowerInvokable(TargetLowering::CallLoweringInfo &CLI,
                                     const BasicBlock *EHPadBB) {
@@ -5826,6 +5884,8 @@ SelectionDAGBuilder::lowerInvokable(TargetLowering::CallLoweringInfo &CLI,
   }
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
+
+  lowerGCLiveVarsInInvoke(CLI, *this, Result.second.getNode());
 
   assert((CLI.IsTailCall || Result.second.getNode()) &&
          "Non-null chain expected with non-tail call!");
@@ -6526,8 +6586,9 @@ void SelectionDAGBuilder::visitCall(const CallInst &I) {
 
   // Deopt bundles are lowered in LowerCallSiteWithDeoptBundle, and we don't
   // have to do anything here to lower funclet bundles.
-  assert(!I.hasOperandBundlesOtherThan(
-             {LLVMContext::OB_deopt, LLVMContext::OB_funclet}) &&
+  assert(!I.hasOperandBundlesOtherThan({LLVMContext::OB_deopt,
+                                        LLVMContext::OB_funclet,
+                                        LLVMContext::OB_gc_livevars}) &&
          "Cannot lower calls with arbitrary operand bundles!");
 
   if (I.countOperandBundlesOfType(LLVMContext::OB_deopt))

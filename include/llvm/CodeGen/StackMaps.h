@@ -12,14 +12,14 @@
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCSymbol.h"
 #include <vector>
 
 namespace llvm {
 
-class AsmPrinter;
-class MCExpr;
 class MCStreamer;
 
 /// \brief MI-level stackmap operands.
@@ -192,9 +192,14 @@ public:
     LocationType Type;
     unsigned Size;
     unsigned Reg;
-    int64_t Offset;
-    Location() : Type(Unprocessed), Size(0), Reg(0), Offset(0) {}
-    Location(LocationType Type, unsigned Size, unsigned Reg, int64_t Offset)
+    const MCExpr *Offset;
+    Location() : Type(Unprocessed), Size(0), Reg(0), Offset(nullptr) {}
+    Location(LocationType Type, unsigned Size, unsigned Reg, int64_t Offset,
+             AsmPrinter &AP)
+        : Type(Type), Size(Size), Reg(Reg),
+          Offset(MCConstantExpr::create(Offset, AP.OutContext)) {}
+    Location(LocationType Type, unsigned Size, unsigned Reg,
+             const MCExpr *Offset)
         : Type(Type), Size(Size), Reg(Reg), Offset(Offset) {}
   };
 
@@ -274,7 +279,7 @@ private:
   MachineInstr::const_mop_iterator
   parseOperand(MachineInstr::const_mop_iterator MOI,
                MachineInstr::const_mop_iterator MOE, LocationVec &Locs,
-               LiveOutVec &LiveOuts) const;
+               LiveOutVec &LiveOuts, MCSymbol *MILabel) const;
 
   /// \brief Create a live-out register record for the given register @p Reg.
   LiveOutReg createLiveOutReg(unsigned Reg,

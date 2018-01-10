@@ -91,7 +91,7 @@ static unsigned getDwarfRegNum(unsigned Reg, const TargetRegisterInfo *TRI) {
 MachineInstr::const_mop_iterator
 StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
                         MachineInstr::const_mop_iterator MOE, LocationVec &Locs,
-                        LiveOutVec &LiveOuts) const {
+                        LiveOutVec &LiveOuts, MCSymbol *MILabel) const {
   const TargetRegisterInfo *TRI = AP.MF->getSubtarget().getRegisterInfo();
   if (MOI->isImm()) {
     switch (MOI->getImm()) {
@@ -106,7 +106,7 @@ StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
       unsigned Reg = (++MOI)->getReg();
       int64_t Imm = (++MOI)->getImm();
       Locs.emplace_back(StackMaps::Location::Direct, Size,
-                        getDwarfRegNum(Reg, TRI), Imm);
+                        getDwarfRegNum(Reg, TRI), Imm, AP);
       break;
     }
     case StackMaps::IndirectMemRefOp: {
@@ -115,14 +115,14 @@ StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
       unsigned Reg = (++MOI)->getReg();
       int64_t Imm = (++MOI)->getImm();
       Locs.emplace_back(StackMaps::Location::Indirect, Size,
-                        getDwarfRegNum(Reg, TRI), Imm);
+                        getDwarfRegNum(Reg, TRI), Imm, AP);
       break;
     }
     case StackMaps::ConstantOp: {
       ++MOI;
       assert(MOI->isImm() && "Expected constant operand.");
       int64_t Imm = MOI->getImm();
-      Locs.emplace_back(Location::Constant, sizeof(int64_t), 0, Imm);
+      Locs.emplace_back(Location::Constant, sizeof(int64_t), 0, Imm, AP);
       break;
     }
     }
@@ -150,12 +150,29 @@ StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
     if (SubRegIdx)
       Offset = TRI->getSubRegIdxOffset(SubRegIdx);
 
-    Locs.emplace_back(Location::Register, RC->getSize(), DwarfRegNum, Offset);
+    Locs.emplace_back(Location::Register, RC->getSize(), DwarfRegNum, Offset,
+                      AP);
     return ++MOI;
   }
 
   if (MOI->isRegLiveOut())
     LiveOuts = parseRegisterLiveOutMask(MOI->getRegLiveOut());
+
+  if (MOI->isGlobal()) {
+    auto &DL = AP.MF->getDataLayout();
+
+    unsigned Size = DL.getPointerSizeInBits();
+    assert((Size % 8) == 0 && "Need pointer size in bytes.");
+    Size /= 8;
+    unsigned DwarfRegNum = getDwarfRegNum(TRI->getProgramCounter(), TRI);
+
+    MCContext &OutContext = AP.OutContext;
+    MCSymbol *target = AP.TM.getSymbol(MOI->getGlobal());
+    const MCExpr *value = MCBinaryExpr::createSub(
+        MCSymbolRefExpr::create(target, OutContext),
+        MCSymbolRefExpr::create(MILabel, OutContext), OutContext);
+    Locs.emplace_back(Location::Direct, Size, DwarfRegNum, value);
+  }
 
   return ++MOI;
 }
@@ -168,7 +185,7 @@ void StackMaps::print(raw_ostream &OS) {
     const LocationVec &CSLocs = CSI.Locations;
     const LiveOutVec &LiveOuts = CSI.LiveOuts;
 
-    OS << WSMP << "callsite " << CSI.ID << "\n";
+    OS << WSMP << "callsite " << *CSI.CSOffsetExpr << " ID: " << CSI.ID << "\n";
     OS << WSMP << "  has " << CSLocs.size() << " locations\n";
 
     unsigned Idx = 0;
@@ -192,7 +209,7 @@ void StackMaps::print(raw_ostream &OS) {
         else
           OS << Loc.Reg;
         if (Loc.Offset)
-          OS << " + " << Loc.Offset;
+          OS << " + " << *Loc.Offset;
         break;
       case Location::Indirect:
         OS << "Indirect ";
@@ -200,17 +217,17 @@ void StackMaps::print(raw_ostream &OS) {
           OS << TRI->getName(Loc.Reg);
         else
           OS << Loc.Reg;
-        OS << "+" << Loc.Offset;
+        OS << "+" << *Loc.Offset;
         break;
       case Location::Constant:
-        OS << "Constant " << Loc.Offset;
+        OS << "Constant " << *Loc.Offset;
         break;
       case Location::ConstantIndex:
-        OS << "Constant Index " << Loc.Offset;
+        OS << "Constant Index " << *Loc.Offset;
         break;
       }
       OS << "\t[encoding: .byte " << Loc.Type << ", .byte " << Loc.Size
-         << ", .short " << Loc.Reg << ", .int " << Loc.Offset << "]\n";
+         << ", .short " << Loc.Reg << ", .int " << *Loc.Offset << "]\n";
       Idx++;
     }
 
@@ -297,19 +314,22 @@ void StackMaps::recordStackMapOpers(const MachineInstr &MI, uint64_t ID,
   if (recordResult) {
     assert(PatchPointOpers(&MI).hasDef() && "Stackmap has no return value.");
     parseOperand(MI.operands_begin(), std::next(MI.operands_begin()), Locations,
-                 LiveOuts);
+                 LiveOuts, MILabel);
   }
 
   // Parse operands.
   while (MOI != MOE) {
-    MOI = parseOperand(MOI, MOE, Locations, LiveOuts);
+    MOI = parseOperand(MOI, MOE, Locations, LiveOuts, MILabel);
   }
 
   // Move large constants into the constant pool.
   for (auto &Loc : Locations) {
     // Constants are encoded as sign-extended integers.
     // -1 is directly encoded as .long 0xFFFFFFFF with no constant pool.
-    if (Loc.Type == Location::Constant && !isInt<32>(Loc.Offset)) {
+    if (Loc.Type == Location::Constant) {
+      int64_t Offset;
+      if (!Loc.Offset->evaluateAsAbsolute(Offset) || isInt<32>(Offset))
+        continue;
       Loc.Type = Location::ConstantIndex;
       // ConstPool is intentionally a MapVector of 'uint64_t's (as
       // opposed to 'int64_t's).  We should never be in a situation
@@ -321,8 +341,9 @@ void StackMaps::recordStackMapOpers(const MachineInstr &MI, uint64_t ID,
              (uint64_t)Loc.Offset !=
                  DenseMapInfo<uint64_t>::getTombstoneKey() &&
              "empty and tombstone keys should fit in 32 bits!");
-      auto Result = ConstPool.insert(std::make_pair(Loc.Offset, Loc.Offset));
-      Loc.Offset = Result.first - ConstPool.begin();
+      auto Result = ConstPool.insert(std::make_pair(Offset, Offset));
+      Loc.Offset = MCConstantExpr::create(Result.first - ConstPool.begin(),
+                                          AP.OutContext);
     }
   }
 
@@ -510,7 +531,11 @@ void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
       OS.EmitIntValue(Loc.Type, 1);
       OS.EmitIntValue(Loc.Size, 1);
       OS.EmitIntValue(Loc.Reg, 2);
-      OS.EmitIntValue(Loc.Offset, 4);
+      if (Loc.Offset) {
+        OS.EmitValue(Loc.Offset, 4);
+      } else {
+        OS.EmitIntValue(0, 4);
+      }
     }
 
     // Num live-out registers and padding to align to 4 byte.

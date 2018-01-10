@@ -184,6 +184,7 @@ void X86MachObjectWriter::RecordX86_64Relocation(
       return;
     }
 
+#if 0
     // A subtraction expression where either symbol is undefined is a
     // non-relocatable expression.
     if (A->isUndefined() || B->isUndefined()) {
@@ -193,11 +194,16 @@ void X86MachObjectWriter::RecordX86_64Relocation(
         Name + "' can not be undefined in a subtraction expression");
       return;
     }
+#endif
 
-    Value += Writer->getSymbolAddress(*A, Layout) -
-             (!A_Base ? 0 : Writer->getSymbolAddress(*A_Base, Layout));
-    Value -= Writer->getSymbolAddress(*B, Layout) -
-             (!B_Base ? 0 : Writer->getSymbolAddress(*B_Base, Layout));
+    if (A != A_Base) {
+      Value += Writer->getSymbolAddress(*A, Layout) -
+               (!A_Base ? 0 : Writer->getSymbolAddress(*A_Base, Layout));
+    }
+    if (B != B_Base) {
+      Value -= Writer->getSymbolAddress(*B, Layout) -
+               (!B_Base ? 0 : Writer->getSymbolAddress(*B_Base, Layout));
+    }
 
     if (!A_Base)
       Index = A->getFragment()->getParent()->getOrdinal() + 1;

@@ -187,7 +187,8 @@ public:
       Direct,
       Indirect,
       Constant,
-      ConstantIndex
+      ConstantIndex,
+      Global
     };
     LocationType Type;
     unsigned Size;

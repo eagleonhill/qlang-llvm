@@ -155,24 +155,23 @@ StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
     return ++MOI;
   }
 
-  if (MOI->isRegLiveOut())
-    LiveOuts = parseRegisterLiveOutMask(MOI->getRegLiveOut());
-
   if (MOI->isGlobal()) {
     auto &DL = AP.MF->getDataLayout();
 
     unsigned Size = DL.getPointerSizeInBits();
     assert((Size % 8) == 0 && "Need pointer size in bytes.");
     Size /= 8;
-    unsigned DwarfRegNum = getDwarfRegNum(TRI->getProgramCounter(), TRI);
 
     MCContext &OutContext = AP.OutContext;
     MCSymbol *target = AP.TM.getSymbol(MOI->getGlobal());
-    const MCExpr *value = MCBinaryExpr::createSub(
-        MCSymbolRefExpr::create(target, OutContext),
-        MCSymbolRefExpr::create(MILabel, OutContext), OutContext);
-    Locs.emplace_back(Location::Direct, Size, DwarfRegNum, value);
+    const MCExpr *value = MCSymbolRefExpr::create(target, OutContext);
+    Locs.emplace_back(Location::Global, Size, 0, value);
+    return ++MOI;
   }
+
+  if (MOI->isRegLiveOut())
+    LiveOuts = parseRegisterLiveOutMask(MOI->getRegLiveOut());
+
 
   return ++MOI;
 }
@@ -224,6 +223,9 @@ void StackMaps::print(raw_ostream &OS) {
         break;
       case Location::ConstantIndex:
         OS << "Constant Index " << *Loc.Offset;
+        break;
+      case Location::Global:
+        OS << "Global " << *Loc.Offset;
         break;
       }
       OS << "\t[encoding: .byte " << Loc.Type << ", .byte " << Loc.Size
@@ -477,7 +479,7 @@ void StackMaps::emitConstantPoolEntries(MCStreamer &OS) {
 ///   uint16 : Reserved (record flags)
 ///   uint16 : NumLocations
 ///   Location[NumLocations] {
-///     uint8  : Register | Direct | Indirect | Constant | ConstantIndex
+///     uint8  : Register | Direct | Indirect | Constant | ConstantIndex | Global
 ///     uint8  : Size in Bytes
 ///     uint16 : Dwarf RegNum
 ///     int32  : Offset
@@ -498,6 +500,7 @@ void StackMaps::emitConstantPoolEntries(MCStreamer &OS) {
 ///   0x3, Indirect, [Reg + Offset]      (spilled value)
 ///   0x4, Constant, Offset              (small constant)
 ///   0x5, ConstIndex, Constants[Offset] (large constant)
+///   0x6, Global, Offset                (PC rel global var)
 void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
   DEBUG(print(dbgs()));
   // Callsite entries.

@@ -1,4 +1,4 @@
-//===------------------- StackMaps.h - StackMaps ----------------*- C++ -*-===//
+//===- StackMaps.h - StackMaps ----------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -15,12 +15,19 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/Support/Debug.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
 #include <vector>
 
 namespace llvm {
 
 class MCStreamer;
+class raw_ostream;
+class TargetRegisterInfo;
 
 /// \brief MI-level stackmap operands.
 ///
@@ -138,21 +145,27 @@ public:
 ///
 /// Statepoint operands take the form:
 ///   <id>, <num patch bytes >, <num call arguments>, <call target>,
-///   [call arguments], <StackMaps::ConstantOp>, <calling convention>,
+///   [call arguments...],
+///   <StackMaps::ConstantOp>, <calling convention>,
 ///   <StackMaps::ConstantOp>, <statepoint flags>,
-///   <StackMaps::ConstantOp>, <num other args>, [other args],
-///   [gc values]
+///   <StackMaps::ConstantOp>, <num deopt args>, [deopt args...],
+///   <gc base/derived pairs...> <gc allocas...>
+/// Note that the last two sets of arguments are not currently length
+///   prefixed.
 class StatepointOpers {
-private:
+  // TODO:: we should change the STATEPOINT representation so that CC and
+  // Flags should be part of meta operands, with args and deopt operands, and
+  // gc operands all prefixed by their length and a type code. This would be
+  // much more consistent. 
+public:
   // These values are aboolute offsets into the operands of the statepoint
   // instruction.
   enum { IDPos, NBytesPos, NCallArgsPos, CallTargetPos, MetaEnd };
 
   // These values are relative offests from the start of the statepoint meta
   // arguments (i.e. the end of the call arguments).
-  enum { CCOffset = 1, FlagsOffset = 3, NumVMSArgsOffset = 5 };
+  enum { CCOffset = 1, FlagsOffset = 3, NumDeoptOperandsOffset = 5 };
 
-public:
   explicit StatepointOpers(const MachineInstr *MI) : MI(MI) {}
 
   /// Get starting index of non call related arguments
@@ -190,26 +203,26 @@ public:
       ConstantIndex,
       Global
     };
-    LocationType Type;
-    unsigned Size;
-    unsigned Reg;
-    const MCExpr *Offset;
-    Location() : Type(Unprocessed), Size(0), Reg(0), Offset(nullptr) {}
+    LocationType Type = Unprocessed;
+    unsigned Size = 0;
+    unsigned Reg = 0;
+    const MCExpr *Offset = nullptr;
+
+    Location() = default;
     Location(LocationType Type, unsigned Size, unsigned Reg, int64_t Offset,
              AsmPrinter &AP)
         : Type(Type), Size(Size), Reg(Reg),
           Offset(MCConstantExpr::create(Offset, AP.OutContext)) {}
-    Location(LocationType Type, unsigned Size, unsigned Reg,
-             const MCExpr *Offset)
+    Location(LocationType Type, unsigned Size, unsigned Reg, const MCExpr *Offset)
         : Type(Type), Size(Size), Reg(Reg), Offset(Offset) {}
   };
 
   struct LiveOutReg {
-    unsigned short Reg;
-    unsigned short DwarfRegNum;
-    unsigned short Size;
+    unsigned short Reg = 0;
+    unsigned short DwarfRegNum = 0;
+    unsigned short Size = 0;
 
-    LiveOutReg() : Reg(0), DwarfRegNum(0), Size(0) {}
+    LiveOutReg() = default;
     LiveOutReg(unsigned short Reg, unsigned short DwarfRegNum,
                unsigned short Size)
         : Reg(Reg), DwarfRegNum(DwarfRegNum), Size(Size) {}
@@ -218,7 +231,7 @@ public:
   // OpTypes are used to encode information about the following logical
   // operand (which may consist of several MachineOperands) for the
   // OpParser.
-  typedef enum { DirectMemRefOp, IndirectMemRefOp, ConstantOp } OpType;
+  using OpType = enum { DirectMemRefOp, IndirectMemRefOp, ConstantOp };
 
   StackMaps(AsmPrinter &AP);
 
@@ -246,31 +259,34 @@ public:
 
 private:
   static const char *WSMP;
-  typedef SmallVector<Location, 8> LocationVec;
-  typedef SmallVector<LiveOutReg, 8> LiveOutVec;
-  typedef MapVector<uint64_t, uint64_t> ConstantPool;
+
+  using LocationVec = SmallVector<Location, 8>;
+  using LiveOutVec = SmallVector<LiveOutReg, 8>;
+  using ConstantPool = MapVector<uint64_t, uint64_t>;
 
   struct FunctionInfo {
-    uint64_t StackSize;
-    uint64_t RecordCount;
-    FunctionInfo() : StackSize(0), RecordCount(1) {}
-    explicit FunctionInfo(uint64_t StackSize) : StackSize(StackSize), RecordCount(1) {}
+    uint64_t StackSize = 0;
+    uint64_t RecordCount = 1;
+
+    FunctionInfo() = default;
+    explicit FunctionInfo(uint64_t StackSize) : StackSize(StackSize) {}
   };
 
   struct CallsiteInfo {
-    const MCExpr *CSOffsetExpr;
-    uint64_t ID;
+    const MCExpr *CSOffsetExpr = nullptr;
+    uint64_t ID = 0;
     LocationVec Locations;
     LiveOutVec LiveOuts;
-    CallsiteInfo() : CSOffsetExpr(nullptr), ID(0) {}
+
+    CallsiteInfo() = default;
     CallsiteInfo(const MCExpr *CSOffsetExpr, uint64_t ID,
                  LocationVec &&Locations, LiveOutVec &&LiveOuts)
         : CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
           LiveOuts(std::move(LiveOuts)) {}
   };
 
-  typedef MapVector<const MCSymbol *, FunctionInfo> FnInfoMap;
-  typedef std::vector<CallsiteInfo> CallsiteInfoList;
+  using FnInfoMap = MapVector<const MCSymbol *, FunctionInfo>;
+  using CallsiteInfoList = std::vector<CallsiteInfo>;
 
   AsmPrinter &AP;
   CallsiteInfoList CSInfos;
@@ -315,6 +331,7 @@ private:
   void print(raw_ostream &OS);
   void debug() { print(dbgs()); }
 };
-}
 
-#endif
+} // end namespace llvm
+
+#endif // LLVM_CODEGEN_STACKMAPS_H

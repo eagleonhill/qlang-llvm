@@ -13,26 +13,44 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/AssumptionCache.h"
-#include "llvm/IR/CallSite.h"
-#include "llvm/IR/Dominators.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
-#include "llvm/Support/Debug.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <cassert>
+#include <utility>
+
 using namespace llvm;
 using namespace llvm::PatternMatch;
 
-SmallVector<WeakVH, 1> &AssumptionCache::getAffectedValues(Value *V) {
+static cl::opt<bool>
+    VerifyAssumptionCache("verify-assumption-cache", cl::Hidden,
+                          cl::desc("Enable verification of assumption cache"),
+                          cl::init(false));
+
+SmallVector<WeakTrackingVH, 1> &
+AssumptionCache::getOrInsertAffectedValues(Value *V) {
   // Try using find_as first to avoid creating extra value handles just for the
   // purpose of doing the lookup.
   auto AVI = AffectedValues.find_as(V);
   if (AVI != AffectedValues.end())
     return AVI->second;
 
-  auto AVIP = AffectedValues.insert({
-      AffectedValueCallbackVH(V, this), SmallVector<WeakVH, 1>()});
+  auto AVIP = AffectedValues.insert(
+      {AffectedValueCallbackVH(V, this), SmallVector<WeakTrackingVH, 1>()});
   return AVIP.first->second;
 }
 
@@ -47,9 +65,11 @@ void AssumptionCache::updateAffectedValues(CallInst *CI) {
     } else if (auto *I = dyn_cast<Instruction>(V)) {
       Affected.push_back(I);
 
-      if (I->getOpcode() == Instruction::BitCast ||
-          I->getOpcode() == Instruction::PtrToInt) {
-        auto *Op = I->getOperand(0);
+      // Peek through unary operators to find the source of the condition.
+      Value *Op;
+      if (match(I, m_BitCast(m_Value(Op))) ||
+          match(I, m_PtrToInt(m_Value(Op))) ||
+          match(I, m_Not(m_Value(Op)))) {
         if (isa<Instruction>(Op) || isa<Argument>(Op))
           Affected.push_back(Op);
       }
@@ -76,18 +96,11 @@ void AssumptionCache::updateAffectedValues(CallInst *CI) {
         Value *B;
         ConstantInt *C;
         // (A & B) or (A | B) or (A ^ B).
-        if (match(V,
-                  m_CombineOr(m_And(m_Value(A), m_Value(B)),
-                    m_CombineOr(m_Or(m_Value(A), m_Value(B)),
-                                m_Xor(m_Value(A), m_Value(B)))))) {
+        if (match(V, m_BitwiseLogic(m_Value(A), m_Value(B)))) {
           AddAffected(A);
           AddAffected(B);
         // (A << C) or (A >>_s C) or (A >>_u C) where C is some constant.
-        } else if (match(V,
-                         m_CombineOr(m_Shl(m_Value(A), m_ConstantInt(C)),
-                           m_CombineOr(m_LShr(m_Value(A), m_ConstantInt(C)),
-                                       m_AShr(m_Value(A),
-                                              m_ConstantInt(C)))))) {
+        } else if (match(V, m_Shift(m_Value(A), m_ConstantInt(C)))) {
           AddAffected(A);
         }
       };
@@ -98,7 +111,7 @@ void AssumptionCache::updateAffectedValues(CallInst *CI) {
   }
 
   for (auto &AV : Affected) {
-    auto &AVV = getAffectedValues(AV);
+    auto &AVV = getOrInsertAffectedValues(AV);
     if (std::find(AVV.begin(), AVV.end(), CI) == AVV.end())
       AVV.push_back(CI);
   }
@@ -111,20 +124,27 @@ void AssumptionCache::AffectedValueCallbackVH::deleted() {
   // 'this' now dangles!
 }
 
+void AssumptionCache::copyAffectedValuesInCache(Value *OV, Value *NV) {
+  auto &NAVV = getOrInsertAffectedValues(NV);
+  auto AVI = AffectedValues.find(OV);
+  if (AVI == AffectedValues.end())
+    return;
+
+  for (auto &A : AVI->second)
+    if (std::find(NAVV.begin(), NAVV.end(), A) == NAVV.end())
+      NAVV.push_back(A);
+}
+
 void AssumptionCache::AffectedValueCallbackVH::allUsesReplacedWith(Value *NV) {
   if (!isa<Instruction>(NV) && !isa<Argument>(NV))
     return;
 
   // Any assumptions that affected this value now affect the new value.
 
-  auto &NAVV = AC->getAffectedValues(NV);
-  auto AVI = AC->AffectedValues.find(getValPtr());
-  if (AVI == AC->AffectedValues.end())
-    return;
-
-  for (auto &A : AVI->second)
-    if (std::find(NAVV.begin(), NAVV.end(), A) == NAVV.end())
-      NAVV.push_back(A);
+  AC->copyAffectedValuesInCache(getValPtr(), NV);
+  // 'this' now might dangle! If the AffectedValues map was resized to add an
+  // entry for NV then this object might have been destroyed in favor of some
+  // copy in the grown map.
 }
 
 void AssumptionCache::scanFunction() {
@@ -222,7 +242,13 @@ AssumptionCache &AssumptionCacheTracker::getAssumptionCache(Function &F) {
 }
 
 void AssumptionCacheTracker::verifyAnalysis() const {
-#ifndef NDEBUG
+  // FIXME: In the long term the verifier should not be controllable with a
+  // flag. We should either fix all passes to correctly update the assumption
+  // cache and enable the verifier unconditionally or somehow arrange for the
+  // assumption list to be updated automatically by passes.
+  if (!VerifyAssumptionCache)
+    return;
+
   SmallPtrSet<const CallInst *, 4> AssumptionSet;
   for (const auto &I : AssumptionCaches) {
     for (auto &VH : I.second->assumptions())
@@ -231,19 +257,19 @@ void AssumptionCacheTracker::verifyAnalysis() const {
 
     for (const BasicBlock &B : cast<Function>(*I.first))
       for (const Instruction &II : B)
-        if (match(&II, m_Intrinsic<Intrinsic::assume>()))
-          assert(AssumptionSet.count(cast<CallInst>(&II)) &&
-                 "Assumption in scanned function not in cache");
+        if (match(&II, m_Intrinsic<Intrinsic::assume>()) &&
+            !AssumptionSet.count(cast<CallInst>(&II)))
+          report_fatal_error("Assumption in scanned function not in cache");
   }
-#endif
 }
 
 AssumptionCacheTracker::AssumptionCacheTracker() : ImmutablePass(ID) {
   initializeAssumptionCacheTrackerPass(*PassRegistry::getPassRegistry());
 }
 
-AssumptionCacheTracker::~AssumptionCacheTracker() {}
+AssumptionCacheTracker::~AssumptionCacheTracker() = default;
+
+char AssumptionCacheTracker::ID = 0;
 
 INITIALIZE_PASS(AssumptionCacheTracker, "assumption-cache-tracker",
                 "Assumption Cache Tracker", false, true)
-char AssumptionCacheTracker::ID = 0;

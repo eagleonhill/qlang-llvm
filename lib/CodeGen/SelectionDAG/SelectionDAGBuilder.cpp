@@ -6102,15 +6102,7 @@ static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
   SDLoc DL = builder.getCurSDLoc();
   Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i64));
   Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i32));
-  for (Value *liveVar : bundle.getValue().Inputs) {
-    SDValue OpVal;
-    if (GlobalValue *GV = dyn_cast<GlobalValue>(liveVar->stripPointerCasts())) {
-      EVT VT = DAG.getTargetLoweringInfo().getValueType(
-          DAG.getDataLayout(), liveVar->getType(), true);
-      OpVal = DAG.getTargetGlobalAddress(GV, builder.getCurSDLoc(), VT);
-    } else {
-      OpVal = builder.getValue(liveVar);
-    }
+  auto addSDValue = [&](SDValue OpVal) {
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(OpVal)) {
       Ops.push_back(
           builder.DAG.getTargetConstant(StackMaps::ConstantOp, DL, MVT::i64));
@@ -6122,6 +6114,23 @@ static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
           FI->getIndex(), TLI.getPointerTy(builder.DAG.getDataLayout())));
     } else
       Ops.push_back(OpVal);
+  };
+  for (Value *liveVar : bundle.getValue().Inputs) {
+    SDValue OpVal;
+    if (GlobalValue *GV = dyn_cast<GlobalValue>(liveVar->stripPointerCasts())) {
+      EVT VT = DAG.getTargetLoweringInfo().getValueType(
+          DAG.getDataLayout(), liveVar->getType(), true);
+      OpVal = DAG.getTargetGlobalAddress(GV, builder.getCurSDLoc(), VT);
+    } else {
+      OpVal = builder.getValue(liveVar);
+    }
+    if (liveVar->getType()->isStructTy()) {
+      // Interface type. 1st pointer is the value, 2nd pointer is type.
+      addSDValue(OpVal);
+      addSDValue(SDValue(OpVal.getNode(), OpVal.getResNo() + 1));
+    } else {
+      addSDValue(OpVal);
+    }
   }
 
   Ops.push_back(Chain);

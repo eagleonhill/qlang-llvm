@@ -6267,7 +6267,9 @@ SelectionDAGBuilder::lowerInvokable(TargetLowering::CallLoweringInfo &CLI,
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
 
-  lowerGCLiveVarsInInvoke(CLI, *this, Result.second.getNode());
+  if (!CLI.CS.isTailCall()) {
+    lowerGCLiveVarsInInvoke(CLI, *this, Result.second.getNode());
+  }
 
   assert((CLI.IsTailCall || Result.second.getNode()) &&
          "Non-null chain expected with non-tail call!");

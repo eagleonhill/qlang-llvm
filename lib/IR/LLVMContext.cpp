@@ -89,6 +89,11 @@ LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
          "gc-livevars operand bundle id drifted!");
   (void)GClivevarsEntry;
 
+  auto *QlangForkParams = pImpl->getOrInsertBundleTag("q-fork-params");
+  assert(QlangForkParams->second == LLVMContext::OB_q_fork_params &&
+         "q-fork-params operand bundle id drifted!");
+  (void)QlangForkParams;
+
   SyncScope::ID SingleThreadSSID =
       pImpl->getOrInsertSyncScopeID("singlethread");
   assert(SingleThreadSSID == SyncScope::SingleThread &&

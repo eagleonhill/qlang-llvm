@@ -2383,7 +2383,8 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
   // have to do anything here to lower funclet bundles.
   assert(!I.hasOperandBundlesOtherThan({LLVMContext::OB_deopt,
                                         LLVMContext::OB_funclet,
-                                        LLVMContext::OB_gc_livevars}) &&
+                                        LLVMContext::OB_gc_livevars,
+                                        LLVMContext::OB_q_fork_params}) &&
          "Cannot lower invokes with arbitrary operand bundles yet!");
 
   const Value *Callee(I.getCalledValue());
@@ -6072,13 +6073,15 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
   }
 }
 
-static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
-                                    SelectionDAGBuilder &builder,
-                                    SDNode *CallEnd) {
+static void lowerStackMapsInInvoke(TargetLowering::CallLoweringInfo &CLI,
+                                   SelectionDAGBuilder &builder,
+                                   SDNode *CallEnd,
+                                   FunctionLoweringInfo &FuncInfo,
+                                   int operandBundle, int64_t stackMapId) {
   if (!CLI.CS) {
     return;
   }
-  auto bundle = CLI.CS.getOperandBundle(LLVMContext::OB_gc_livevars);
+  auto bundle = CLI.CS.getOperandBundle(operandBundle);
   if (!bundle.hasValue()) {
     return;
   }
@@ -6100,7 +6103,7 @@ static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
   Ops.reserve(bundle.getValue().Inputs.size() + 2);
   auto &DAG = builder.DAG;
   SDLoc DL = builder.getCurSDLoc();
-  Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i64));
+  Ops.push_back(DAG.getTargetConstant(stackMapId, DL, MVT::i64));
   Ops.push_back(DAG.getTargetConstant(0, DL, MVT::i32));
   auto addSDValue = [&](SDValue OpVal) {
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(OpVal)) {
@@ -6143,6 +6146,9 @@ static void lowerGCLiveVarsInInvoke(TargetLowering::CallLoweringInfo &CLI,
 
   DAG.UpdateNodeOperands(CallEnd, Chain, CallEnd->getOperand(1),
                          CallEnd->getOperand(2), InFlag);
+
+  // Inform the Frame Information that we have a stackmap in this function.
+  FuncInfo.MF->getFrameInfo().setHasStackMap();
 }
 
 void SelectionDAGBuilder::visitConstrainedFPIntrinsic(
@@ -6268,7 +6274,10 @@ SelectionDAGBuilder::lowerInvokable(TargetLowering::CallLoweringInfo &CLI,
   std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
 
   if (!CLI.CS.isTailCall()) {
-    lowerGCLiveVarsInInvoke(CLI, *this, Result.second.getNode());
+    lowerStackMapsInInvoke(CLI, *this, Result.second.getNode(), FuncInfo,
+                           LLVMContext::OB_gc_livevars, 0);
+    lowerStackMapsInInvoke(CLI, *this, Result.second.getNode(), FuncInfo,
+                           LLVMContext::OB_q_fork_params, 1);
   }
 
   assert((CLI.IsTailCall || Result.second.getNode()) &&
@@ -8082,6 +8091,7 @@ void SelectionDAGBuilder::LowerContinuableInvoke(
   Type *RetTy = FTy->getReturnType();
 
   TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.CS = CS;
   populateCallLoweringInfo(CLI, CS, /*arg no */ 1, CS.arg_size() - 1,
                            getValue(Callee), RetTy, false);
 
@@ -8147,6 +8157,7 @@ void SelectionDAGBuilder::visitPatchpoint(ImmutableCallSite CS,
     IsAnyRegCC ? Type::getVoidTy(*DAG.getContext()) : CS->getType();
 
   TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.CS = CS;
   populateCallLoweringInfo(CLI, CS, NumMetaOpers, NumCallArgs, Callee, ReturnTy,
                            true);
   std::pair<SDValue, SDValue> Result = lowerInvokable(CLI, EHPadBB);

@@ -6273,12 +6273,14 @@ SelectionDAGBuilder::lowerInvokable(TargetLowering::CallLoweringInfo &CLI,
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
 
+  /*
   if (!CLI.CS.isTailCall()) {
     lowerStackMapsInInvoke(CLI, *this, Result.second.getNode(), FuncInfo,
                            LLVMContext::OB_gc_livevars, 0);
     lowerStackMapsInInvoke(CLI, *this, Result.second.getNode(), FuncInfo,
                            LLVMContext::OB_q_fork_params, 1);
   }
+  */
 
   assert((CLI.IsTailCall || Result.second.getNode()) &&
          "Non-null chain expected with non-tail call!");
@@ -8021,10 +8023,8 @@ void SelectionDAGBuilder::LowerContinuableBranchValue(ImmutableCallSite CS) {
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   Type *RetTy = CS.getType();
   const Instruction *Invocation = cast<Instruction>(CS.getArgOperand(0));
+  ImmutableCallSite InvocationCall(Invocation);
 
-  SmallVector<EVT, 4> RetTys;
-  SmallVector<uint64_t, 4> Offsets;
-  ComputeValueVTs(TLI, DL, RetTy, RetTys, &Offsets);
   int DemoteStackIdx = -1;
   SDValue DemoteStackSlot;
   auto demoteStackIdxIt = FuncInfo.DemoteStackIdxMaps.find(Invocation);
@@ -8036,42 +8036,68 @@ void SelectionDAGBuilder::LowerContinuableBranchValue(ImmutableCallSite CS) {
   }
   TargetLowering::CallLoweringInfo CLI(DAG);
 
+  TargetLowering::ArgListTy Args;
+  size_t NumArgs = InvocationCall.arg_size() - 1;
+  Args.reserve(NumArgs);
+
+  // Populate the argument list.
+  // Attributes for args start at offset 1, after the return attribute.
+  for (unsigned ArgI = 1, ArgE = 1 + NumArgs; ArgI != ArgE; ++ArgI) {
+    const Value *V = InvocationCall->getOperand(ArgI);
+
+    assert(!V->getType()->isEmptyTy() && "Empty type passed to intrinsic.");
+
+    TargetLowering::ArgListEntry Entry;
+    auto VT = TLI.getValueType(DAG.getDataLayout(), V->getType());
+    Entry.Node = DAG.getUNDEF(VT);
+    Entry.Ty = V->getType();
+    Entry.setAttributes(&InvocationCall, ArgI);
+    Args.push_back(Entry);
+  }
+
+  SDValue ContValue = DAG.getNode(ISD::CONT_VALUE, getCurSDLoc(), MVT::Other);
+
   CLI.setDebugLoc(getCurSDLoc())
       .setChain(getRoot())
-      .setCallee(CS.getCallingConv(),
-                 CanLowerReturn ? RetTy : Type::getVoidTy(*DAG.getContext()),
-                 DAG.getNode(ISD::CONT_VALUE, getCurSDLoc(), MVT::Other), {})
+      .setCallee(CS.getCallingConv(), RetTy, ContValue, std::move(Args))
       .setDiscardResult(CS->use_empty());
 
-  if (CanLowerReturn) {
-    for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
-      EVT VT = RetTys[I];
-      MVT RegisterVT = TLI.getRegisterType(CLI.RetTy->getContext(), VT);
-      unsigned NumRegs = TLI.getNumRegisters(CLI.RetTy->getContext(), VT);
-      for (unsigned i = 0; i != NumRegs; ++i) {
-        ISD::InputArg MyFlags;
-        MyFlags.VT = RegisterVT;
-        MyFlags.ArgVT = VT;
-        MyFlags.Used = CLI.IsReturnValueUsed;
-        if (CLI.RetSExt)
-          MyFlags.Flags.setSExt();
-        if (CLI.RetZExt)
-          MyFlags.Flags.setZExt();
-        if (CLI.IsInReg)
-          MyFlags.Flags.setInReg();
-        CLI.Ins.push_back(MyFlags);
-      }
+  std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
+  // Find the actual invoke, erase all the callers and preparations.
+  assert(ContValue->hasOneUse());
+  SDNode *CallNode = *ContValue.getNode()->use_begin();
+
+  SDNode *Root = CallNode;
+  while (Root->getOpcode() != ISD::CALLSEQ_START) {
+    Root = Root->getOperand(0).getNode();
+  }
+
+  // Replace CallNode's chain with root.
+  SDVTList VTs = CallNode->getVTList();
+  SmallVector<SDValue, 4> Ops;
+  // Force stack size to 0, it's already setup.
+  // TODO: Set appropriate value for CFI but not emit stack adjustment.
+  Ops.emplace_back(
+      DAG.getCALLSEQ_START(Root->getOperand(0), 0, 0, getCurSDLoc()));
+  // Needs frame pointer due to incorrect CFI if using SP.
+  FuncInfo.MF->getFrameInfo().setHasStackMap();
+  // Callee
+  Ops.emplace_back(CallNode->getOperand(1));
+  // Skip all other registers except register mask.
+  for (auto &value : CallNode->ops()) {
+    if (value.getNode()->getOpcode() == ISD::RegisterMask) {
+      Ops.emplace_back(value);
     }
   }
-  SmallVector<SDValue, 4> InVals;
-  CLI.Chain = TLI.LowerCall(CLI, InVals);
 
-  // Update CLI.InVals to use outside of this function.
-  CLI.InVals = InVals;
-  setValue(CS.getInstruction(),
-           ::LowerReturn(TLI, CLI, CanLowerReturn, RetTy, RetTys, Offsets,
-                         DemoteStackIdx, DemoteStackSlot)
-               .first);
+  CallNode = DAG.MorphNodeTo(CallNode, CallNode->getOpcode(), VTs, Ops);
+
+  if (Result.first.getNode()) {
+    const Instruction *Inst = CS.getInstruction();
+    Result.first = lowerRangeToAssertZExt(DAG, *Inst, Result.first);
+    setValue(Inst, Result.first);
+  }
+  return;
 }
 
 void SelectionDAGBuilder::visitContinuableOrigValue(const CallInst &CI) {
@@ -8090,29 +8116,38 @@ void SelectionDAGBuilder::LowerContinuableInvoke(
       cast<PointerType>(Callee->getType())->getElementType());
   Type *RetTy = FTy->getReturnType();
 
-  TargetLowering::CallLoweringInfo CLI(DAG);
-  CLI.CS = CS;
-  populateCallLoweringInfo(CLI, CS, /*arg no */ 1, CS.arg_size() - 1,
+  StatepointLoweringInfo SI(DAG);
+  SI.CLI.CS = CS;
+  populateCallLoweringInfo(SI.CLI, CS, /*arg no */ 1, CS.arg_size() - 1,
                            getValue(Callee), RetTy, false);
+  SI.ID = 1;
+  SI.EHPadBB = EHPadBB;
+  SI.StatepointFlags = 0;
+  SI.NumPatchBytes = 0;
+  if (auto bundle = CS.getOperandBundle(LLVMContext::OB_q_fork_params)) {
+    SI.DeoptState =
+        ArrayRef<const Use>(bundle->Inputs.begin(), bundle->Inputs.end());
+  }
+  SDValue Result = LowerAsSTATEPOINT(SI);
 
-  std::pair<SDValue, SDValue> Result = lowerInvokable(CLI, EHPadBB);
-  if (CLI.DemoteStackIdx >= 0) {
-    FuncInfo.DemoteStackIdxMaps[CS.getInstruction()] = CLI.DemoteStackIdx;
+  // std::pair<SDValue, SDValue> Result = lowerInvokable(CLI, EHPadBB);
+  if (SI.CLI.DemoteStackIdx >= 0) {
+    FuncInfo.DemoteStackIdxMaps[CS.getInstruction()] = SI.CLI.DemoteStackIdx;
   }
 
-  if (Result.first.getNode()) {
+  if (!RetTy->isVoidTy() && Result.getNode()) {
     const Instruction *Inst = CS.getInstruction();
-    Result.first = lowerRangeToAssertZExt(DAG, *Inst, Result.first);
+    Result = lowerRangeToAssertZExt(DAG, *Inst, Result);
 
     unsigned Reg = FuncInfo.CreateRegs(RetTy);
     RegsForValue RFV(*DAG.getContext(), DAG.getTargetLoweringInfo(),
                        DAG.getDataLayout(), Reg, RetTy);
     SDValue Chain = DAG.getEntryNode();
 
-    RFV.getCopyToRegs(Result.first, DAG, getCurSDLoc(), Chain, nullptr);
+    RFV.getCopyToRegs(Result, DAG, getCurSDLoc(), Chain, nullptr);
     PendingExports.push_back(Chain);
     FuncInfo.ValueMap[CS.getInstruction()] = Reg;
-    setValue(Inst, Result.first);
+    setValue(Inst, Result);
   }
 }
 
@@ -8397,7 +8432,10 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     uint64_t TySize = DL.getTypeAllocSize(CLI.RetTy);
     unsigned Align = DL.getPrefTypeAlignment(CLI.RetTy);
     MachineFunction &MF = CLI.DAG.getMachineFunction();
-    DemoteStackIdx = MF.getFrameInfo().CreateStackObject(TySize, Align, false);
+    DemoteStackIdx =
+        CLI.DemoteStackIdx == -1
+            ? MF.getFrameInfo().CreateStackObject(TySize, Align, false)
+            : CLI.DemoteStackIdx;
     CLI.DemoteStackIdx = DemoteStackIdx;
     Type *StackSlotPtrType = PointerType::getUnqual(CLI.RetTy);
 

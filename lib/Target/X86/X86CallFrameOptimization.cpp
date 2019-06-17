@@ -388,7 +388,7 @@ void X86CallFrameOptimization::collectCallInfo(MachineFunction &MF,
   // instruction and its first use. We use the call instruction as a boundary
   // because it is usually cheaper to check if an instruction is a call than
   // checking if an instruction uses a register.
-  for (auto J = I; !J->isCall(); ++J)
+  for (auto J = I; !J->isCall(); ++J) {
     if (J->isCopy() && J->getOperand(0).isReg() && J->getOperand(1).isReg() &&
         J->getOperand(1).getReg() == StackPtr) {
       StackPtrCopyInst = J;
@@ -396,6 +396,9 @@ void X86CallFrameOptimization::collectCallInfo(MachineFunction &MF,
       StackPtr = Context.SPCopy->getOperand(0).getReg();
       break;
     }
+    if (J->getOpcode() != TII->getCallFrameDestroyOpcode())
+      return;
+  }
 
   // Scan the call setup sequence for the pattern we're looking for.
   // We only handle a simple case - a sequence of store instructions that
